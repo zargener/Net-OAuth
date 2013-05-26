@@ -123,30 +123,61 @@ sub gather_message_parameters {
     my %opts = @_;
     $opts{quote} = "" unless defined $opts{quote};
     $opts{params} ||= [];
-    my %params;
-    foreach my $k (@{$self->required_message_params}, @{$self->optional_message_params}, @{$opts{add}}) {
+
+# CHANGED   - collect params into an array, as extra_params may now specify multiple values
+#           - using an arrayref, e.g. extra_params => { x => 1, y => 2, z => [ 3, 4, 5 ] }
+#   my %params;
+    my @params;
+
+# CHANGED   - deduplicate parameter names (in particular this ensures that 'signature' is not processed twice)
+#   foreach my $k (@{$self->required_message_params}, @{$self->optional_message_params}, @{$opts{add}}) {
+    my %want = map {$_=>1} @{$self->required_message_params}, @{$self->optional_message_params}, @{$opts{add}};
+    foreach my $k (keys %want) {
+
         next if $k eq 'signature' and (!$self->sign_message or !grep ($_ eq 'signature', @{$opts{add}}));
         my $message_key = $self->is_extension_param($k) ? $k : OAUTH_PREFIX . $k;
         my $v = $self->$k;
-        $params{$message_key} = $v if defined $v;
+
+# CHANGED   - we're now collecting into an array
+#       $params{$message_key} = $v if defined $v;
+        push @params, $message_key => $v if defined $v;
+
     }
     if ($self->{extra_params} and !$opts{no_extra} and $self->allow_extra_params) {
-        foreach my $k (keys %{$self->{extra_params}}) {
-            $params{$k} = $self->{extra_params}{$k};
+
+# CHANGED   - collecting into an array
+#       foreach my $k (keys %{$self->{extra_params}}) {
+#           $params{$k} = $self->{extra_params}{$k};
+#       }
+        while(my ($k, $v) = each %{$self->{extra_params}}) {
+            push @params, $k => $_ foreach ref $v ? @$v : ($v);
         }
+
         if ($self->can('request_url')) {
             my $url = $self->request_url;
             _ensure_uri_object($url);         
             foreach my $k ($url->query_param) {
-                $params{$k} = $url->query_param($k);
+
+# CHANGED   - collecting into an array
+#               $params{$k} = $url->query_param($k);
+                push @params, $k => $_ foreach $url->query_param($k);
+
             }
         }
     }
-    if ($opts{hash}) {
-        return \%params;
+    if ($opts{array}) {
+
+# CHANGED   - we're now returning an arrayref
+#       return \%params;
+        return \@params;
+
     }
     my @pairs;
-    while (my ($k,$v) = each %params) {
+
+# CHANGED   - we now need to iterate key/values from an array instead
+#   while (my ($k,$v) = each %params) {
+    while (my ($k,$v) = splice(@params, 0, 2)) {
+
         push @pairs, join('=', encode($k), $opts{quote} . encode($v) . $opts{quote});
     }
     return sort(@pairs);
@@ -196,6 +227,21 @@ sub to_authorization_header {
         join($sep, $self->gather_message_parameters(quote => '"', add => [qw/signature/], no_extra => 1));
 }
 
+# ADDED     - when repeated values for the same param appear, accumulate them
+#           - into an arrayref, instead of overwriting the same scalar
+sub _accumulate {
+    my ($hash, $k, $v) = @_;
+    foreach(ref $v eq 'ARRAY' ? @$v : ($v)) {
+        if (exists $hash->{$k}) {
+            $hash->{$k} = [ $hash->{$k} ] unless ref $hash->{$k} eq 'ARRAY';
+            push @{ $hash->{$k} }, $_;
+        }
+        else {
+            $hash->{$k} = $_;
+        }
+    }
+}
+
 sub from_authorization_header {
     my $proto = shift;
     my $header = shift;
@@ -218,7 +264,11 @@ sub _from_pairs() {
         if (defined $k and defined $v) {
             $v =~ s/(^"|"$)//g;
             ($k,$v) = map decode($_), $k, $v;
-            $params{$k} = $v;
+
+# CHANGED   - allow for repeated parameters
+#           $params{$k} = $v;
+            _accumulate(\%params, $k, $v);
+
         }
     }
     return $class->from_hash(\%params, @_);
@@ -255,7 +305,11 @@ sub from_hash {
             }
         }
         else {
-            $msg_params{extra_params}->{$k} = $hash->{$k};
+
+# CHANGED   - allow for repeated parameters
+#           $msg_params{extra_params}->{$k} = $hash->{$k};
+            _accumulate(\%{ $msg_params{extra_params} }, $k, $hash->{$k});
+
         }
     }
     $api_params{from_hash} = 1;
@@ -288,7 +342,14 @@ sub from_post_body {
 
 sub to_hash {
     my $self = shift;
-    return $self->gather_message_parameters(hash => 1, add => [qw/signature/]);
+# CHANGED   - all for repeated parameters
+#   return $self->gather_message_parameters(hash => 1, add => [qw/signature/]);
+    my @params = @{ $self->gather_message_parameters(array => 1, add => [qw/signature/]) };
+    my %params;
+    while(my ($k, $v) = splice(@params, 0, 2)) {
+        _accumulate(\%params, $k, $v);
+    }
+    return \%params;
 }
 
 sub to_url {
@@ -301,13 +362,18 @@ sub to_url {
         _ensure_uri_object($url);
         $url = $url->clone; # don't modify the URL that was passed in
         $url->query(undef); # remove any existing query params, as these may cause the signature to break	
-		my $params = $self->to_hash;
-		my $sep = '?';
-		foreach my $k (sort keys %$params) {
-		    $url .= $sep . encode($k) . '=' . encode( $params->{$k} );
-            $sep = '&' if $sep eq '?';
-		}
-		return $url;
+
+# CHANGED - gather_message_parameters does what we need, and copes with repeated params, so let's reuse it...
+#   	my $params = $self->to_hash;
+#   	my $sep = '?';
+#   	foreach my $k (sort keys %$params) {
+#   	    $url .= $sep . encode($k) . '=' . encode( $params->{$k} );
+#           $sep = '&' if $sep eq '?';
+#   	}
+        my $query_string = join '&', $self->gather_message_parameters(add => [qw/signature/]);
+		$url .= '?' . $query_string if $query_string ne '';
+
+        return $url;
 	}
 	else {
 		return $self->to_post_body;

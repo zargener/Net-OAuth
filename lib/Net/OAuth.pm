@@ -230,7 +230,9 @@ When sending a message the last step is to serialize it and send it to wherever 
 
 =head2 API PARAMETERS vs MESSAGE PARAMETERS
 
-Net::OAuth defines 'message parameters' as parameters that are part of the transmitted OAuth message.  These include any protocol parameter (prefixed with 'oauth_' in the message), and any additional message parameters (the extra_params hash).
+Net::OAuth defines 'message parameters' as parameters that are part of the transmitted OAuth message.  These include any protocol parameter (prefixed with 'oauth_' in the message), and any additional message parameters (the extra_params hash). Multiple values can be specified for the same message parameter by supplying an arrayref of values in the extra_params hash. E.g. foo=1&bar=2&bar=3 would be specified as:
+
+ extra_params => { foo => 1, bar => [ 2, 3 ] }
 
 'API parameters' are parameters required to build a message object that are not transmitted with the message, e.g. consumer_secret, token_secret, request_url, request_method.
 
@@ -267,7 +269,7 @@ All parameters can be get/set using accessor methods. E.g.
 
 =head2 THE REQUEST_URL PARAMETER
 
-Any query parameters in the request_url are removed and added to the extra_params hash when generating the signature.
+Any query parameters in the request_url are removed and added to the extra_params hash when generating the signature. (Note: if the same parameter name appears multiple times, all the values will be accumulated into an arrayref, instead of a simple scalar).
 
 E.g. the following requests are pretty much equivalent:
 
